@@ -293,13 +293,18 @@ def overviewString2(part1, part2, total, legend):
     return percentageString(part1, total) + " / " + percentageString(part2, total) + " (" + legend + ")"
 
 def overviewString2Latex(part1, part2, total, legend):
-    return percentageStringLatex(part1, total) + " \% & " + percentageStringLatex(part2, total) + "\% (" + legend + ")"
+    # FIXED: escape % for Python strings / LaTeX
+    return (percentageStringLatex(part1, total) + " \\% & " +
+            percentageStringLatex(part2, total) + "\\% (" + legend + ")")
 
 def overviewString3(part1, part2, part3, total, legend):
     return percentageString(part1, total) + " / " + percentageString(part2, total) + " / "+  percentageString(part3, total) + " (" + legend + ")"
 
 def overviewString3Latex(part1, part2, part3, total, legend):
-    return percentageStringLatex(part1, total) + "\% & " + percentageStringLatex(part2, total) + "\% & "+  percentageStringLatex(part3, total) + "\% (" + legend + ")"
+    # FIXED: escape % for Python strings / LaTeX
+    return (percentageStringLatex(part1, total) + "\\% & " +
+            percentageStringLatex(part2, total) + "\\% & " +
+            percentageStringLatex(part3, total) + "\\% (" + legend + ")")
 
 def overviewStringList(l):
     if len(l) == 0:
@@ -553,4 +558,3 @@ def generateCloneLengthFiles(RES_DIR):
                         ratio+=1
                 p_out.write(str(i) + "," + str((100*ratio)/float(len(P_LENS))))
                 p_out.write("\n")
-
