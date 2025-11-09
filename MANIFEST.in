@@ -1,0 +1,4 @@
+recursive-include src/omniccg/tools *
+recursive-include src/omniccg/scripts *
+include README.md
+include LICENSE
