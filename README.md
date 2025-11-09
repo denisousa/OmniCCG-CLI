@@ -141,3 +141,13 @@ The endpoint returns an **XML** describing genealogical clone lineages of the an
 ```
 results/
 ```
+
+## Install
+```
+pip install -e .
+```
+
+## Example CLI
+```
+omniccg --git-repo https://github.com/denisousa/clones-test --from-first-commit --clone-detector nicad
+```

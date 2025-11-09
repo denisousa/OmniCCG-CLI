@@ -12,8 +12,7 @@ import xml.etree.ElementTree as ET
 import xml.etree.ElementTree as etree
 from datetime import datetime, timedelta
 from typing import Union, Dict, Any, List, Iterable, Optional, Tuple
-from .analysis import Analysis, generateCloneLengthFiles
-from .count_methods import count_java_methods_in_file
+from .analysis import Analysis, count_java_methods_in_file
 
 # =========================
 # Print utilities
