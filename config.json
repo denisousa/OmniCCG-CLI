@@ -1,11 +1,11 @@
 {
-    "git_repository": "https://github.com/denisousa/clones-test",
-    "user_settings": {
-        "from_first_commit": true,
-        "from_a_specific_commit": null,
-        "days_prior": null,
-        "merge_commit": null,
-        "fixed_leaps": null,
-        "clone_detector": "nicad"
-    }
+  "git_repository": "https://github.com/denisousa/clones-test",
+  "user_settings": {
+    "from_first_commit": true,
+    "from_a_specific_commit": null,
+    "days_prior": null,
+    "merge_commit": null,
+    "fixed_leaps": null
+  },
+  "detection-api": "http://localhost:5001"
 }

@@ -55,18 +55,19 @@ def printInfo(message):
 class Settings:
     git_url: str = ""
     local_path: str = ""
-    language: str = "java"  # "java" or "c"
     clone_detector_tool: Optional[str] = None  # "nicad" | "simian" | None
+    detection_api: Optional[str] = None        # <—— NEW
 
-    # Temporal scope / commit selection
+    # Temporal scope / commit selection (mutually exclusive)
     from_begin: bool = False
-    specific_commit: str = ""  # when provided, uses SPECIFIC..HEAD as range
-    use_merge_commits: bool = False
+    specific_commit: str = ""   # when provided, uses SPECIFIC..HEAD as range
     use_days: bool = False
     days: Optional[int] = None
+
+    # Defaults: not used unless explicitly provided
+    use_merge_commits: bool = False
     use_leaps: bool = False
     commit_leaps: Optional[int] = None
-
 
 @dataclass
 class Paths:
@@ -479,23 +480,15 @@ def PrepareSourceCode(ctx: "Context") -> bool:
     os.makedirs(p.data_dir, exist_ok=True)
     os.makedirs(p.prod_data_dir, exist_ok=True)
 
-    lang = (s.language or "").lower().strip().lstrip(".")  # e.g., "java" or "c"
-    if not lang:
-        printError("Language not set.")
-        return False
-
     repo_path = Path(repo_root)
 
-    # Recursively pick files by extension; skip .git and files with "test" in the filename
-    for src in repo_path.rglob(f"*.{lang}"):
-        # Skip anything inside .git
+    # Pick only .java files; skip .git and *test* files
+    for src in repo_path.rglob("*.java"):
         if any(part == ".git" for part in src.parts):
             continue
-        # Skip files whose name contains "test" (case-insensitive)
         if "test" in src.name.lower():
             continue
 
-        # Relative dir of the source; root files go directly into production/
         rel_dir = os.path.relpath(str(src.parent), repo_root)
         dst_dir = p.prod_data_dir if rel_dir == "." else os.path.join(p.prod_data_dir, rel_dir)
 
@@ -505,7 +498,6 @@ def PrepareSourceCode(ctx: "Context") -> bool:
 
     print("Source code ready for clone analysis.\n")
     return found
-
 
 def StartFromPreviousVersion(ctx: "Context") -> int:
     p = ctx.paths
@@ -594,79 +586,104 @@ def find_method_end(lines, decl_line, brace_col):
 # Clone detection (cross‑platform)
 # =========================
 
-def RunCloneDetection(ctx: "Context"):
+import os
+import shutil
+import subprocess
+from pathlib import Path
+import requests
+
+def RunCloneDetection(ctx: "Context", current_hash: str):
     s, p = ctx.settings, ctx.paths
     print("Starting clone detection:")
 
-    clone_detector_result = Path(p.clone_detector_dir)
-    clone_detector_result.mkdir(parents=True, exist_ok=True)
-    for item in clone_detector_result.iterdir():
+    # Normalize paths
+    out_dir = Path(p.clone_detector_dir)
+    out_xml = Path(p.clone_detector_xml)
+    tools_dir = Path(p.tools_dir)
+    prod_data_dir = Path(p.prod_data_dir)
+    data_dir = Path(p.data_dir)
+
+    # Prepare output folder (clean files, keep folder)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for item in out_dir.iterdir():
         if item.is_file():
             item.unlink()
+    out_xml.parent.mkdir(parents=True, exist_ok=True)
+
+    tool = (s.clone_detector_tool or "").lower()
+
+    out_dir = Path(p.clone_detector_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for item in out_dir.iterdir():
+        if item.is_file():
+            item.unlink()
+
+    det_api = s.detection_api
+    if isinstance(det_api, str) and det_api.strip():
+        sha = current_hash
+        repo = s.git_url
+        url = det_api.rstrip("/") + "/clone-detection/trigger"
+        try:
+            print(f" >>> GET {url}?sha={sha}&repo={repo}")
+            r = requests.get(url, params={"sha": sha, "repo": repo}, timeout=15)
+            if 200 <= r.status_code < 300:
+                os.makedirs(os.path.dirname(p.clone_detector_xml), exist_ok=True)
+                with open(p.clone_detector_xml, "wb") as f:
+                    f.write(r.content)
+                print("External detection API trigger accepted. Result written.\n")
+                return
+            else:
+                print(f"External detection API failed (HTTP {r.status_code}). Falling back...")
+        except Exception as e:
+            print(f"External detection API error: {e}. Falling back...")
+
 
     tool = (s.clone_detector_tool or "").casefold()
     if tool == "nicad":
         print(" >>> Running NiCad...")
-        os.makedirs(p.cur_res_dir, exist_ok=True)
+        nicad_root = tools_dir / "NiCad"
+        # Try common executable names on Linux/Windows
+        nicad_execs = [nicad_root / "nicad6", nicad_root / "nicad6.bat", nicad_root / "nicad6.exe"]
+        nicad_exec = next((str(x) for x in nicad_execs if x.exists()), None)
+        if not nicad_exec:
+            raise FileNotFoundError(f"NiCad executable not found in: {nicad_root}")
 
-        nicad_dir = os.path.join(p.tools_dir, "NiCad")  # absolute
-        target_dir = p.prod_data_dir                     # absolute
+        # Run NiCad with absolute paths; no shell
+        subprocess.run(
+            [nicad_exec, "functions", "java", str(prod_data_dir)],
+            cwd=str(nicad_root),
+            check=True,
+        )
 
-        # Choose executable for the platform
-        nicad_exe_candidates = [
-            os.path.join(nicad_dir, "nicad6.bat"),  # Windows packaged bat
-            os.path.join(nicad_dir, "nicad6"),      # Unix shell script
-        ]
-        nicad_exe = next((c for c in nicad_exe_candidates if os.path.exists(c)), None)
-        if not nicad_exe:
-            raise FileNotFoundError("NiCad executable (nicad6/nicad6.bat) not found under tools/NiCad.")
+        # Locate NiCad output XML (threshold suffix may vary)
+        nicad_xml_dir = Path(f"{prod_data_dir}_functions-clones")
+        candidates = sorted(nicad_xml_dir.glob("*-classes.xml"))
+        if not candidates:
+            raise FileNotFoundError(f"No NiCad classes XML found in: {nicad_xml_dir}")
+        shutil.move(str(candidates[0]), str(out_xml))
 
-        # Run without shell piping; capture output
-        try:
-            run_cmd([nicad_exe, "functions", s.language, target_dir], cwd=nicad_dir, check=True)
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"NiCad failed: {e.stderr or e.stdout}")
-
-        # Locate standard NiCad output and move into fixed location
-        nicad_xml_dir = f'{target_dir}_functions-clones'
-        nicad_xml = os.path.join(nicad_xml_dir, "production_functions-clones-0.30-classes.xml")
-        if not os.path.exists(nicad_xml):
-            # fallback: find the first *classes.xml produced
-            matches = list(Path(nicad_xml_dir).glob("*classes.xml"))
-            if matches:
-                nicad_xml = str(matches[0])
-        if not os.path.exists(nicad_xml):
-            raise FileNotFoundError("NiCad output XML not found.")
-
-        shutil.move(nicad_xml, p.clone_detector_xml)
-        # Cleanup NiCad temp/output folders
-        shutil.rmtree(nicad_xml_dir, ignore_errors=True)
-        # Remove NiCad logs under dataset dir if present
-        for log in Path(ctx.paths.data_dir).glob("*.log"):
+        # Cleanup NiCad temp/output and logs (cross-platform)
+        if nicad_xml_dir.exists():
+            shutil.rmtree(nicad_xml_dir, ignore_errors=True)
+        for log in Path(data_dir).glob("*.log"):
             try:
                 log.unlink()
-            except Exception:
+            except FileNotFoundError:
                 pass
+
+        print("Finished clone detection.\n")
         return
 
     if tool == "simian":
         print(" >>> Running Simian...")
-        java_jar_command = f'java -jar {p.tools_dir}/simian/simian-4.0.0.jar'  # absolute
+        java_jar_command = f"java -jar {os.path.join(p.tools_dir, 'simian', 'simian-4.0.0.jar')}"
         options_command = "-formatter=xml"
-        simian_command = f'{java_jar_command} {options_command} "{p.prod_data_dir}"/*.{s.language} > "{p.clone_detector_xml}"'
+        simian_command = f'{java_jar_command} {options_command} "{p.prod_data_dir}"/*.java > "{p.clone_detector_xml}"'
         os.system(simian_command)
         parse_simian_to_clones(p.clone_detector_xml)
+        print(" Finished clone detection.\n")
         return
 
-    # If no tool is selected, just clean the folder
-    for f in Path(p.clone_detector_dir).iterdir():
-        if f.is_file():
-            f.unlink()
-            
-    print(" Finished clone detection.\n")
-
-
-    # If no tool is selected, just clean the folder
     for f in Path(p.clone_detector_dir).iterdir():
         if f.is_file():
             f.unlink()
@@ -956,37 +973,46 @@ def insert_parent_hash(ctx: "Context", parent_hash: str):
 def init_settings_from_user(general_settings: Dict[str, Any]) -> Settings:
     user = general_settings.get("user_settings", {}) or {}
 
-    # correct field names
     git_repository = general_settings.get("git_repository", "")
     local_path = general_settings.get("local_path", "")
-    language = user.get("language") or general_settings.get("language", "java")
+    detection_api = general_settings.get("detection-api") or None  # string URL or None
 
+    # Read raw selectors
     from_first_commit = bool(user.get("from_first_commit"))
-    specific_commit = user.get("from_a_specific_commit") or ""
+    specific_commit = (user.get("from_a_specific_commit") or "").strip()
     days_prior = user.get("days_prior")  # may be None or int
 
-    merge_commit = user.get("merge_commit")  # optional
-    fixed_leaps = user.get("fixed_leaps")    # optional
+    # Enforce single selection with default = from_first_commit True
+    fac_ok = bool(specific_commit)
+    dp_ok = isinstance(days_prior, int) and days_prior > 0
+    chosen = (1 if from_first_commit else 0) + (1 if fac_ok else 0) + (1 if dp_ok else 0)
+    if chosen == 0:
+        from_first_commit = True
+        specific_commit = ""
+        days_prior = None
 
-    clone_detector = user.get("clone_detector")  # REQUIRED by your rule
+    merge_commit = user.get("merge_commit")     # optional
+    fixed_leaps = user.get("fixed_leaps")       # optional
+
+    clone_detector = user.get("clone_detector")  # optional now; ignored if detection_api set
 
     s = Settings(
         git_url=git_repository,
         local_path=local_path,
-        language=language,
         clone_detector_tool=clone_detector,
+        detection_api=detection_api,
 
         from_begin=from_first_commit,
         specific_commit=specific_commit or "",
-        use_days=days_prior is not None,
-        days=days_prior,
+        use_days=dp_ok,
+        days=days_prior if dp_ok else None,
 
+        # defaults = not used unless provided
         use_merge_commits=bool(merge_commit),
         use_leaps=bool(fixed_leaps),
         commit_leaps=fixed_leaps,
     )
     return s
-
 
 def _derive_repo_name(settings: Settings) -> str:
     """
@@ -1008,15 +1034,6 @@ def _derive_repo_name(settings: Settings) -> str:
 # =========================
 
 def validate_user_input_or_raise(general_settings: Dict[str, Any]) -> None:
-    """
-    Rules:
-    - Required: git_repository (root) and clone_detector (inside user_settings)
-    - Select exactly ONE among:
-        * from_first_commit (bool True)
-        * from_a_specific_commit (non-empty string)
-        * days_prior (int > 0)
-    - merge_commit and fixed_leaps are optional.
-    """
     if not isinstance(general_settings, dict):
         raise ValueError("Invalid configuration: root object must be a dictionary.")
 
@@ -1027,36 +1044,21 @@ def validate_user_input_or_raise(general_settings: Dict[str, Any]) -> None:
     if not git_repo or not isinstance(git_repo, str) or not git_repo.strip():
         raise ValueError("Missing required field: 'git_repository'.")
 
-    clone_detector = user.get("clone_detector")
-    if not clone_detector or not isinstance(clone_detector, str) or not clone_detector.strip():
-        raise ValueError("Missing required field in 'user_settings': 'clone_detector'.")
-
-    # Exclusivity among the three selectors
+    # Exclusivity among the three selectors (allow zero; we'll default later)
     ffc = bool(user.get("from_first_commit"))
     fac = user.get("from_a_specific_commit")
     fac_ok = isinstance(fac, str) and fac.strip() != ""
     dp = user.get("days_prior")
     dp_ok = isinstance(dp, int) and dp > 0
 
-    chosen = sum([1 if ffc else 0, 1 if fac_ok else 0, 1 if dp_ok else 0])
-
-    if chosen == 0:
-        raise ValueError(
-            "You must provide exactly ONE of "
-            "'from_first_commit', 'from_a_specific_commit', or 'days_prior'."
-        )
+    chosen = (1 if ffc else 0) + (1 if fac_ok else 0) + (1 if dp_ok else 0)
     if chosen > 1:
         raise ValueError(
             "Invalid configuration: provide only ONE of "
             "'from_first_commit', 'from_a_specific_commit', or 'days_prior' (mutually exclusive)."
         )
-
-    # If days_prior is present but invalid (0, negative, non-int)
     if dp is not None and not dp_ok:
         raise ValueError("'days_prior' must be an integer > 0 when provided.")
-
-    # Others (merge_commit, fixed_leaps) are optional; no strict validation here.
-
 
 def execute_omniccg(general_settings: Dict[str, Any]) -> str:
     validate_user_input_or_raise(general_settings)
@@ -1139,7 +1141,7 @@ def execute_omniccg(general_settings: Dict[str, Any]) -> str:
         if not PrepareSourceCode(ctx):
             continue
 
-        RunCloneDetection(ctx)
+        RunCloneDetection(ctx, current_hash)
         RunGenealogyAnalysis(ctx, hi_plus, current_hash)
         WriteLineageFile(ctx, ctx.state.p_lin_data, paths.p_res_file)
 
