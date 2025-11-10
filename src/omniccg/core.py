@@ -635,43 +635,37 @@ def RunCloneDetection(ctx: "Context", current_hash: str):
             else:
                 print(f"External detection API failed (HTTP {r.status_code}). Falling back...")
         except Exception as e:
-            print(f"External detection API error: {e}. Falling back...")
+            print("External detection API error.")
+            print("Starting to use Nicad.")
+            s.clone_detector_tool = "nicad"
 
 
     tool = (s.clone_detector_tool or "").casefold()
     if tool == "nicad":
-        print(" >>> Running NiCad...")
-        nicad_root = tools_dir / "NiCad"
-        # Try common executable names on Linux/Windows
-        nicad_execs = [nicad_root / "nicad6", nicad_root / "nicad6.bat", nicad_root / "nicad6.exe"]
-        nicad_exec = next((str(x) for x in nicad_execs if x.exists()), None)
-        if not nicad_exec:
-            raise FileNotFoundError(f"NiCad executable not found in: {nicad_root}")
+        print(" >>> Running nicad6...")
+        os.makedirs(p.cur_res_dir, exist_ok=True)
 
-        # Run NiCad with absolute paths; no shell
-        subprocess.run(
-            [nicad_exec, "functions", "java", str(prod_data_dir)],
-            cwd=str(nicad_root),
-            check=True,
-        )
+        subprocess.run(["./nicad6", "functions", "java", p.prod_data_dir],
+                    cwd=Path(p.tools_dir) / "NiCad",
+                    check=True)
 
-        # Locate NiCad output XML (threshold suffix may vary)
-        nicad_xml_dir = Path(f"{prod_data_dir}_functions-clones")
-        candidates = sorted(nicad_xml_dir.glob("*-classes.xml"))
-        if not candidates:
-            raise FileNotFoundError(f"No NiCad classes XML found in: {nicad_xml_dir}")
-        shutil.move(str(candidates[0]), str(out_xml))
+        nicad_xml = f"{p.prod_data_dir}_functions-clones/production_functions-clones-0.30-classes.xml"
+        shutil.move(nicad_xml, p.clone_detector_xml)
+        clones_dir = Path(f"{p.prod_data_dir}_functions-clones")
+        shutil.rmtree(clones_dir, ignore_errors=True)
 
-        # Cleanup NiCad temp/output and logs (cross-platform)
-        if nicad_xml_dir.exists():
-            shutil.rmtree(nicad_xml_dir, ignore_errors=True)
-        for log in Path(data_dir).glob("*.log"):
+        data_dir = Path(ctx.paths.data_dir)
+        for log_file in data_dir.glob("*.log"):
             try:
-                log.unlink()
+                log_file.unlink()
             except FileNotFoundError:
                 pass
+            except PermissionError:
+                pass
 
-        print("Finished clone detection.\n")
+        xml_path = Path(p.clone_detector_xml)
+        new_xml_data = xml_path.read_text(encoding="utf-8")
+        xml_path.write_text(new_xml_data, encoding="utf-8")
         return
 
     if tool == "simian":
@@ -681,17 +675,16 @@ def RunCloneDetection(ctx: "Context", current_hash: str):
         simian_command = f'{java_jar_command} {options_command} "{p.prod_data_dir}"/*.java > "{p.clone_detector_xml}"'
         os.system(simian_command)
         parse_simian_to_clones(p.clone_detector_xml)
-        print(" Finished clone detection.\n")
+        print("Finished clone detection.\n")
         return
 
     for f in Path(p.clone_detector_dir).iterdir():
         if f.is_file():
             f.unlink()
-    print(" Finished clone detection.\n")
+    print("Finished clone detection.\n")
 
 
 def parseCloneClassFile(ctx: "Context", cloneclass_filename: str) -> List[CloneClass]:
-    print(cloneclass_filename)
     cloneclasses: List[CloneClass] = []
     try:
         file_xml = ET.parse(cloneclass_filename)
@@ -778,8 +771,6 @@ def _cloc_total_loc(path: str) -> int:
 
 def RunDensityAnalysis(ctx: "Context", commitNr: int, pcloneclasses: List[CloneClass]):
     s, p, st = ctx.settings, ctx.paths, ctx.state
-    print("Starting density analysis:")
-    print(" > Production code...")
     if not os.path.exists(p.clone_detector_xml):
         st.p_dens_data.append((commitNr, 0, 0))
         return
@@ -812,13 +803,11 @@ def RunDensityAnalysis(ctx: "Context", commitNr: int, pcloneclasses: List[CloneC
     density_loc_p = 100 * (float(amount_of_cloned_p_loc) / total_amount_of_p_loc) if total_amount_of_p_loc else 0.0
 
     st.p_dens_data.append((commitNr, density_f_p, density_loc_p))
-    print(" Finished density analysis.\n")
 
 
 def RunGenealogyAnalysis(ctx: "Context", commitNr: int, hash_: str):
     s, p, st = ctx.settings, ctx.paths, ctx.state
-    print("Starting genealogy analysis:")
-    print(" > Production code...")
+    print(f"Extract Code Code Genealogy (CCG) - Hash Commit {hash_}")
     pcloneclasses = parseCloneClassFile(ctx, p.clone_detector_xml)
 
     if not st.p_lin_data:
@@ -865,7 +854,6 @@ def RunGenealogyAnalysis(ctx: "Context", commitNr: int, hash_: str):
                 l.versions.append(v)
                 st.p_lin_data.append(l)
 
-    print(" Finished genealogy analysis.\n")
     RunDensityAnalysis(ctx, commitNr, pcloneclasses)
 
 
@@ -875,9 +863,6 @@ def build_no_clones_message(detector: Optional[str]) -> str:
     root = ET.Element("result")
     ET.SubElement(root, "status").text = "no_clones_found"
     ET.SubElement(root, "detector").text = detector_name
-    ET.SubElement(root, "message").text = (
-        f"No clones were found across the analyzed commits using the '{detector_name}' detector."
-    )
 
     # Try modern pretty print (Python 3.9+)
     try:
@@ -1122,7 +1107,7 @@ def execute_omniccg(general_settings: Dict[str, Any]) -> str:
         current_hash = hashes[hash_index]
         hi_plus = hash_index + 1
 
-        printInfo("Analyzing commit nr." + str(hi_plus) + " with hash " + current_hash)
+        printInfo("Analyzing commit nr." + str(hi_plus) + " with hash " + current_hash + f"| total commits: {len(hashes)}")
         paths.cur_res_dir = os.path.join(paths.res_dir, f"{hi_plus}_{current_hash}")
 
         # Ensure we are at the correct commit
@@ -1179,4 +1164,4 @@ def execute_omniccg(general_settings: Dict[str, Any]) -> str:
     genealogy_xml = build_genealogy_xml(lineages_xml, metrics_xml)
 
     print("\nDONE")
-    return genealogy_xml
+    return genealogy_xml, lineages_xml, metrics_xml

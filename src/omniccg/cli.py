@@ -1,58 +1,7 @@
-import json
-from urllib.parse import urlparse
-import click
 from .core import execute_omniccg
-
-
-def _is_valid_url(url: str) -> bool:
-    try:
-        p = urlparse(url)
-        return p.scheme in ("http", "https") and bool(p.netloc)
-    except Exception:
-        return False
-
-
-def _enforce_single_selector(user_settings: dict) -> None:
-    """
-    Enforce that exactly one among:
-      - from_first_commit (bool)
-      - from_a_specific_commit (non-empty str)
-      - days_prior (int > 0)
-    is selected. If none provided, default to from_first_commit=True.
-    """
-    ffc = bool(user_settings.get("from_first_commit"))
-    fac = user_settings.get("from_a_specific_commit")
-    dp  = user_settings.get("days_prior")
-
-    has_fac = isinstance(fac, str) and fac.strip() != ""
-    has_dp  = isinstance(dp, int) and dp > 0
-
-    count = int(ffc) + int(has_fac) + int(has_dp)
-
-    if count == 0:
-        # default: from_first_commit = True
-        user_settings["from_first_commit"] = True
-        user_settings["from_a_specific_commit"] = None
-        user_settings["days_prior"] = None
-        return
-
-    if count > 1:
-        raise click.UsageError(
-            "Select only ONE of: from_first_commit OR from_a_specific_commit OR days_prior."
-        )
-
-    # Normalize the non-selected ones to None/False for clarity
-    if ffc:
-        user_settings["from_a_specific_commit"] = None
-        user_settings["days_prior"] = None
-        user_settings["from_first_commit"] = True
-    elif has_fac:
-        user_settings["from_first_commit"] = False
-        user_settings["days_prior"] = None
-    elif has_dp:
-        user_settings["from_first_commit"] = False
-        user_settings["from_a_specific_commit"] = None
-
+from .cli_operations import write_xml_result, enforce_single_selector, is_valid_url
+import click
+import json
 
 @click.command()
 @click.option("--config", "-c",
@@ -83,12 +32,12 @@ def main(config, git_repo, from_first_commit, from_commit, days_prior,
         us = settings.setdefault("user_settings", {})
 
         # Enforce single selector (default to from_first_commit=True)
-        _enforce_single_selector(us)
+        enforce_single_selector(us)
 
         # detection-api logic
         det_api = settings.get("detection-api")
         if det_api is not None:
-            if not isinstance(det_api, str) or not _is_valid_url(det_api):
+            if not isinstance(det_api, str) or not is_valid_url(det_api):
                 raise click.UsageError("When present, 'detection-api' must be a valid http(s) URL string.")
             # ignore clone_detector when detection-api present
             if "clone_detector" in us:
@@ -103,7 +52,9 @@ def main(config, git_repo, from_first_commit, from_commit, days_prior,
         us.setdefault("fixed_leaps", None)
 
         try:
-            return execute_omniccg(settings)
+            genealogy_xml, lineages_xml, metrics_xml = execute_omniccg(settings)
+            write_xml_result(lineages_xml, metrics_xml)
+            return 
         except ValueError as e:
             raise click.UsageError(str(e))
 
@@ -124,7 +75,7 @@ def main(config, git_repo, from_first_commit, from_commit, days_prior,
     }
 
     # Enforce single selector; default to from_first_commit=True if none given
-    _enforce_single_selector(us)
+    enforce_single_selector(us)
 
     settings = {
         "git_repository": git_repo,
@@ -133,7 +84,7 @@ def main(config, git_repo, from_first_commit, from_commit, days_prior,
 
     # detection-api (CLI) takes precedence; do NOT set clone_detector if present
     if detection_api:
-        if not _is_valid_url(detection_api):
+        if not is_valid_url(detection_api):
             raise click.UsageError("Please provide a valid --detection-api (http/https).")
         settings["detection-api"] = detection_api
         click.echo("Notice: --detection-api provided — '--clone-detector' will be ignored.", err=True)
@@ -141,7 +92,9 @@ def main(config, git_repo, from_first_commit, from_commit, days_prior,
         settings["user_settings"]["clone_detector"] = clone_detector
 
     try:
-        return execute_omniccg(settings)
+        genealogy_xml, lineages_xml, metrics_xml = execute_omniccg(settings)
+        write_xml_result(lineages_xml, metrics_xml)        
+        return 
     except ValueError as e:
         raise click.UsageError(str(e))
 
